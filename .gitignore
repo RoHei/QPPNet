@@ -1,0 +1,9 @@
+# load dir
+saved_model/
+
+# python cache
+__pycache__/
+
+# vscode settings
+.vscode/
+
