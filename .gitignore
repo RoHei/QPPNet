@@ -1,9 +1,8 @@
-# load dir
-saved_model/
-
 # python cache
 __pycache__/
 
 # vscode settings
 .vscode/
 
+# generated data files
+saved_model/
