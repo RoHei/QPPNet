@@ -5,9 +5,9 @@ import pickle
 
 num_rel = 8
 max_num_attr = 16
-num_index = 23
-SCALE = 100
-num_per_q = 900
+num_index = 22
+SCALE = 1
+num_per_q = 500
 
 TRAIN_TEST_SPLIT = 0.8
 
@@ -173,9 +173,10 @@ class PSQLTPCHDataSet():
         self.SCALE = SCALE
 
         self.input_func = TPCH_GET_INPUT
-        fnames = [fname for fname in os.listdir(opt.data_dir) if 'csv' in fname]
+        # fnames = [fname for fname in os.listdir(opt.data_dir) if 'csv' in fname]
+        fnames = [fname for fname in os.listdir(opt.data_dir)]
         fnames = sorted(fnames,
-                        key=lambda fname: int(fname.split('temp')[1][:-4]))
+                        key=lambda fname: int(fname.split('_plans')[0][6:]))
 
         data = []
         all_groups, all_groups_test = [], []
@@ -275,26 +276,38 @@ class PSQLTPCHDataSet():
             Returns:
             - jss: a sanitized list of dictionary, one per query, parsed from the input data file
         """
-        jsonstrs = []
-        curr = ""
-        prev = None
-        prevprev = None
+        # jsonstrs = []
+        # curr = ""
+        # prev = None
+        # prevprev = None
+        jss = []
         with open(fname,'r') as f:
-            for row in f:
-                if not ('[' in row or '{' in row or ']' in row or '}' in row \
-                        or ':' in row):
-                    continue
-                newrow = row.replace('+', "").replace("(1 row)\n", "").strip('\n').strip(' ')
-                if 'CREATE' not in newrow and 'DROP' not in newrow and 'Tim' != newrow[:3]:
-                    curr += newrow
-                if prevprev is not None and 'Execution Time' in prevprev:
-                    jsonstrs.append(curr.strip(' ').strip('QUERY PLAN').strip('-'))
-                    curr = ""
-                prevprev = prev
-                prev = newrow
+            for row in f.readlines():
+                # if not ('[' in row or '{' in row or ']' in row or '}' in row \
+                #         or ':' in row):
+                #     continue
+                # newrow = row.replace('+', "").replace("(1 row)\n", "").strip('\n').strip(' ')
+                # if 'CREATE' not in newrow and 'DROP' not in newrow and 'Tim' != newrow[:3]:
+                #     curr += newrow
+                # if prevprev is not None and 'Execution Time' in prevprev:
+                #     jsonstrs.append(curr.strip(' ').strip('QUERY PLAN').strip('-'))
+                #     curr = ""
+                # prevprev = prev
+                # prev = newrow
+                jss.append(json.loads(row)[0]['Plan'])
 
-        strings = [s for s in jsonstrs if s[-1] == ']']
-        jss = [json.loads(s)[0]['Plan'] for s in strings]
+
+        # strings = [s for s in jsonstrs if s[-1] == ']']
+        # print(len(strings))
+        
+        # for idx in range(len(strings)):
+        #     s = strings[idx]
+        #     print(idx)
+        #     print(len(s))
+        #     json.loads(s)
+            
+        #     break
+        # jss = [json.loads(s)[0]['Plan'] for s in strings]
         # jss is a list of json-transformed dicts, one for each query
         return jss
 
