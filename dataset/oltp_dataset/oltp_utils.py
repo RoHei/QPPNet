@@ -29,7 +29,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
 
         all_data = self.get_all_plans(opt.data_dir)
         print(" \n".join([str(ent) for ent in all_data[:10]]))
-        enum, num_grp = self.grouping(all_data)
+        enum, num_grp = self.group_by_plan_structure(all_data)
 
         count = Counter(enum)
         print(count)
@@ -40,8 +40,8 @@ class OLTPDataSet(PSQLTPCHDataSet):
 
         self.grp_idxes = []
         train_data = []
-        train_groups = [[] for j in range(num_grp)]
-        test_groups = [[] for j in range(num_grp)]
+        train_groups = [[] for _ in range(num_grp)]
+        test_groups = [[] for _ in range(num_grp)]
 
         for idx, grp in enumerate(all_groups):
             all_samp_num = len(grp)
@@ -59,7 +59,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
         self.datasize = len(self.dataset)
 
         if not opt.test_time:
-            self.mean_range_dict = self.normalize(train_groups)
+            self.mean_range_dict = self.normalize_operators(train_groups)
             with open('mean_range_dict.pickle', 'wb') as f:
                 pickle.dump(self.mean_range_dict, f)
         else:
@@ -74,7 +74,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
 
     def get_input(self, data): # Helper for sample_data
         """
-            Vectorize the input of a list of plan_dicts that have the same query plan structure structure (of the same template/group)
+            Vectorize the input of a list of plan_dicts that have the same query plan structure (of the same template/group)
 
             Args:
             - data: a list of plan_dict, each plan_dict correspond to a query plan in the dataset;
@@ -118,7 +118,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
 
         return new_samp_dict
 
-    def normalize(self, train_groups): # compute the mean and std vec of each operator
+    def normalize_operators(self, train_groups): # compute the mean and std vec of each operator
         feat_vec_col = defaultdict(list)
 
         def parse_input(data):
@@ -190,7 +190,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
     ###############################################################################
     #       Sampling subbatch data from the dataset; total size is batch_size     #
     ###############################################################################
-    def sample_data(self):
+    def sample_new_batch(self):
         # self.dataset: all queries used in training
         samp = np.random.choice(np.arange(self.datasize), self.batch_size, replace=False)
 

@@ -166,7 +166,7 @@ _SCAN_ORDERS_P1 = [(OpUnit.SEQ_SCAN, [150000, 4, 1, 150000]),
                    (OpUnit.OUTPUT, [150000, 4, 1, 0])
                    ]
 
-# Map from the query pipeline identifier to the their opunit features
+# Map from the query pipeline identifier to their opunit features
 FEATURE_MAP = {"tpch_q1_p1": _Q1_P1,
                "tpch_q1_p2": _Q1_P2,
                "tpch_q1_p3": _Q1_P3,
@@ -197,8 +197,7 @@ FEATURE_MAP = {"tpch_q1_p1": _Q1_P1,
                "tpch_q11_p5": _Q11_P5,
                "tpch_q11_p6": _Q11_P6,
                "tpch_scan_lineitem_p1": _SCAN_LINEITEM_P1,
-               "tpch_scan_orders_p1": _SCAN_ORDERS_P1,
-               }
+               "tpch_scan_orders_p1": _SCAN_ORDERS_P1}
 
 # Map from query pipeline identifier to the memory adjustment factor
 MEM_ADJUST_MAP = {
