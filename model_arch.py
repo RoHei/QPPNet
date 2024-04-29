@@ -1,42 +1,37 @@
 import torch
 import torch.nn as nn
-from torch.nn import init
-import torch.nn.functional as F
-from torch.autograd import Variable
 from torch.optim import lr_scheduler
 
-import functools, os
+import os
 import numpy as np
-import json
 
 from dataset.constants import terrier_dimensions, tpch_dimensions, tpcc_dimensions
 from metric import Metric
 from typing import Tuple
 
-basic = 3
 
 def squared_diff(output, target):
     return torch.sum((output - target) ** 2)
 
 
-###############################################################################
-#                        Operator Neural Unit Architecture                    #
-###############################################################################
-# Neural Unit that covers all operators
 class NeuralUnit(nn.Module):
-    """Define a Resnet block"""
+    """ Neural Unit that covers all operators """
 
-    def __init__(self, node_type, dim_dict, num_layers=5, hidden_size=128,
-                 output_size=32, norm_enabled=False):
-        """
-        Initialize the InternalUnit
-        """
+    def __init__(self, node_type,
+                 dimension: int,
+                 num_layers: int = 5,
+                 hidden_size: int = 128,
+                 output_size: int = 32):
+
         super(NeuralUnit, self).__init__()
         self.node_type = node_type
-        self.dense_block = self.build_block(num_layers, hidden_size, output_size,
-                                            input_dim=dim_dict[node_type])
+        self.dense_block = self.build_block(num_layers=num_layers,
+                                            hidden_size=hidden_size,
+                                            output_size=output_size,
+                                            input_dim=dimension)
 
-    def build_block(self, num_layers, hidden_size, output_size, input_dim):
+    @staticmethod
+    def build_block(num_layers: int, hidden_size: int, output_size: int, input_dim: int) -> nn.Sequential:
         """Construct a block consisting of linear Dense layers.
         Parameters:
             num_layers  (int)
@@ -45,10 +40,11 @@ class NeuralUnit(nn.Module):
             input_dim   (int)           -- input size, depends on each node_type
             norm_layer                  -- normalization layer
         Returns a conv block (with a conv layer, a normalization layer, and a non-linearity layer (ReLU))
+
         """
-        assert (num_layers >= 2)
+        assert num_layers >= 2, "Num of layers need to be greater than 1"
         dense_block = [nn.Linear(input_dim, hidden_size), nn.ReLU()]
-        for i in range(num_layers - 2):
+        for _ in range(num_layers - 2):
             dense_block += [nn.Linear(hidden_size, hidden_size), nn.ReLU()]
         dense_block += [nn.Linear(hidden_size, output_size), nn.ReLU()]
 
@@ -65,131 +61,124 @@ class NeuralUnit(nn.Module):
         return out
 
 
-###############################################################################
-#                               QPP Net Architecture                          #
-###############################################################################
+class QPPNet:
+    """ QPPNet Architecture"""
 
-class QPPNet():
-    def __init__(self, opt):
+    def __init__(self, params):
         self.device = torch.device('cpu:0')
-        self.save_dir: str = opt.save_dir
+        self.save_dir: str = params.save_dir
         if not os.path.exists(self.save_dir):
             os.mkdir(self.save_dir)
         self.test: bool = False
-        self.test_time: bool = opt.test_time
-        self.batch_size: int = opt.batch_size
-        self.dataset: str = opt.dataset
+        self.test_time: bool = params.test_time
+        self.batch_size: int = params.batch_size
+        self.dataset_name: str = params.dataset_name
 
-        if opt.dataset == "PSQLTPCH":
-            self.dimensions = tpch_dimensions
-        elif opt.dataset == "TerrierTPCH":
-            self.dimensions = terrier_dimensions
+        if params.dataset_name == "PSQLTPCH":
+            self.dimensions_by_operator = tpch_dimensions
+
+        elif params.dataset_name == "TerrierTPCH":
+            self.dimensions_by_operator = terrier_dimensions
+
         else:
-            self.dimensions = tpcc_dimensions
+            self.dimensions_by_operator = tpcc_dimensions
 
         self.last_total_loss = None
         self.last_pred_err = None
         self.pred_err = None
-        self.rq = 0
-        self.last_rq = 0
+        self.q_error = 0
+        self.last_q_error = 0
 
         # Initialize the neural units
-        self.units: dict = {}
-        self.optimizers, self.schedulers = {}, {}
+        self.units, self.optimizers, self.schedulers = {}, {}, {}
         self.best = 100000
 
-        for operator in self.dimensions:
-            self.units[operator] = NeuralUnit(operator, self.dimensions).to(self.device)
-            if opt.SGD:
-                optimizer = torch.optim.SGD(self.units[operator].parameters(),
-                                            lr=opt.lr, momentum=0.9)
-            else:
-                optimizer = torch.optim.Adam(self.units[operator].parameters(),
-                                             opt.lr)  # opt.lr
+        for operator_type, dimension in self.dimensions_by_operator.items():
+            self.units[operator_type] = NeuralUnit(operator_type, dimension).to(self.device)
+            self.optimizers[operator_type] = torch.optim.Adam(self.units[operator_type].parameters(), params.lr)
+            if params.scheduler:
+                self.schedulers[operator_type] = lr_scheduler.StepLR(self.optimizers[operator_type], step_size=params.step_size, gamma=params.gamma)
 
-            if opt.scheduler:
-                sc = lr_scheduler.StepLR(optimizer, step_size=opt.step_size,
-                                         gamma=opt.gamma)
-                self.schedulers[operator] = sc
+        self.loss_function = squared_diff
 
-            self.optimizers[operator] = optimizer
-
-        self.loss_fn = squared_diff
         # Initialize the global loss accumulator dict
         self.dummy = torch.zeros(1).to(self.device)
-        self.acc_loss = {operator: [self.dummy] for operator in self.dimensions}
-        self.curr_losses = {operator: 0 for operator in self.dimensions}
+        self.accumulated_loss = {operator: [self.dummy] for operator in self.dimensions_by_operator}
+        self.curr_losses = {operator: 0 for operator in self.dimensions_by_operator}
+
         self.total_loss = None
         self._test_losses = dict()
 
-        if opt.start_epoch > 0 or opt.test_time:
-            self.load_model(opt.start_epoch)
+        if params.start_epoch > 0 or params.test_time:
+            self.load_model(params.start_epoch)
 
     def set_input(self, samp_dicts):
         self.input = samp_dicts
 
-    def _forward_oneQ_batch(self, sample_batch: dict) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward_query_batch(self, batch: dict) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Calculates the loss for a batch of queries from one query template.
         compute a dictionary of losses for each operator
         return output_vec, where 1st col is predicted time
         """
-        feat_vec = sample_batch['feat_vec']
+        feature_vector = batch['feat_vec']
+        node_type = batch['node_type']
+        children = batch['children_plan']
+        features = torch.from_numpy(feature_vector).to(self.device)
 
-        # print(samp_batch['node_type'])
-        # print(feat_vec.shape, print(samp_batch['children_plan']))
-        input_vec = torch.from_numpy(feat_vec).to(self.device)
-        # print(samp_batch['node_type'], input_vec)
-
-        subplans_time = []
-        # Recursively iterate over subplans and append to input_vector.
-        # ToDo: How is this working if children have different operator type?
-
-        for child_plan_dict in sample_batch['children_plan']:
-            child_output_vec, _ = self._forward_oneQ_batch(child_plan_dict)
-            if not child_plan_dict['is_subplan']:
-                input_vec = torch.cat((input_vec, child_output_vec), axis=1)
+        sub_plans_times = []
+        # Recursively iterate over sub plans and append to input_vector.
+        for children_batch in children:
+            child_predictions, _ = self.forward_query_batch(children_batch)
+            # In case, the operator is a leaf, add the current features to the input vector (?)
+            if not children_batch['is_subplan']:
+                features = torch.cat((features, child_predictions), axis=1)
                 # first dim is subbatch_size
             else:
-                subplans_time.append(torch.index_select(child_output_vec, 1, torch.zeros(1, dtype=torch.long).to(self.device)))
+                sub_plan_time = torch.index_select(child_predictions, 1, torch.zeros(1, dtype=torch.long).to(self.device))
+                sub_plans_times.append(sub_plan_time)
 
         # Exception handling if missing data
-        expected_len = self.dimensions[sample_batch['node_type']]
-        if expected_len > input_vec.size()[1]:
-            add_on = torch.zeros(input_vec.size()[0], expected_len - input_vec.size()[1])
-            print(sample_batch['real_node_type'], input_vec.shape, expected_len)
-            input_vec = torch.cat((input_vec, add_on), axis=1)
+        expected_len = self.dimensions_by_operator[node_type]
+        if expected_len > features.size()[1]:
+            add_on = torch.zeros(features.size()[0], expected_len - features.size()[1])
+            # print(batch['real_node_type'], input_vector.shape, expected_len)
+            features = torch.cat((features, add_on), axis=1)
 
         # Do actual forward pass according to the corresponding neural unit
-        output_vec = self.units[sample_batch['node_type']](input_vec)
+        predictions = self.units[node_type](features)
 
         # Predicted time is assumed to be the first column
-        pred_time = torch.index_select(output_vec, 1, torch.zeros(1, dtype=torch.long).to(self.device))
-        cat_res = torch.cat([pred_time] + subplans_time, axis=1)
-        pred_time = torch.sum(cat_res, 1)
+        predicted_operator_times = torch.index_select(predictions, 1, torch.zeros(1, dtype=torch.long).to(self.device))
+
+        # Adding predicted time to times of previous sub-plans.
+        cat_res = torch.cat([predicted_operator_times] + sub_plans_times, axis=1)
+
+        # ?
+        predicted_operator_times = torch.sum(cat_res, 1)
 
         # Compute and collect loss for current node type
-        loss = (pred_time - torch.from_numpy(sample_batch['total_time']).to(self.device)) ** 2
-        self.acc_loss[sample_batch['node_type']].append(loss)
+        real_time = torch.from_numpy(batch['total_time']).to(self.device)
+        loss = (predicted_operator_times - real_time) ** 2
 
-        # added to deal with NaN
-        try:
-            assert (not (torch.isnan(output_vec).any()))
-        except:
-            print("feat_vec", feat_vec, "input_vec", input_vec)
-            # if torch.cuda.is_available():
-            #     print(samp_batch['node_type'], "output_vec: ", output_vec,
-            #           self.units[samp_batch['node_type']].module.cpu().state_dict())
-            # else:
-            print(sample_batch['node_type'], "output_vec: ", output_vec,
-                  self.units[sample_batch['node_type']].cpu().state_dict())
+        # Gather loss in accumulated loss
+        self.accumulated_loss[node_type].append(loss)
+
+        if torch.isnan(predictions).any():
+            print(f"NaN found in output_vector. "
+                  f"feat_vec: {feature_vector} "
+                  f"input_vec: {features} "
+                  f"node_type: {node_type} "
+                  f"output_vec: {predictions} "
+                  f"state_dict: {self.units[node_type].cpu().state_dict()}")
             exit(-1)
-        return output_vec, pred_time
 
-    def _forward(self, epoch):
+        return predictions, predicted_operator_times
+
+    def forward(self, epoch: int):
         # self.input is a list of preprocessed plan_vec_dict
         total_loss = torch.zeros(1).to(self.device)
-        total_losses = {operator: [torch.zeros(1).to(self.device)] for operator in self.dimensions}
+        total_losses = {operator: [torch.zeros(1).to(self.device)] for operator in self.dimensions_by_operator}
 
         if self.test:
             test_loss = []
@@ -199,104 +188,82 @@ class QPPNet():
 
         data_size = 0
         total_mean_mae = torch.zeros(1).to(self.device)
-        for operator_index, sample_dict in enumerate(self.input):
-            # first clear prev computed losses
-            del self.acc_loss
-            self.acc_loss = {operator: [self.dummy] for operator in self.dimensions}
-            _, pred_time = self._forward_oneQ_batch(sample_dict)
 
-            if self.dataset == "PSQLTPCH":
-                epsilon = torch.finfo(pred_time.dtype).eps
+        for query_index, query_dict in enumerate(self.input):
+            # first clear prev computed losses
+            del self.accumulated_loss
+            self.accumulated_loss = {operator: [self.dummy] for operator in self.dimensions_by_operator}
+            _, predicted_runtimes = self.forward_query_batch(query_dict)
+
+            if self.dataset_name == "PSQLTPCH":
+                epsilon = torch.finfo(predicted_runtimes.dtype).eps
             else:
                 epsilon = 0.001
 
-            data_size += len(sample_dict['total_time'])
+            data_size += len(query_dict['total_time'])
 
             if self.test:
-                total_time = torch.from_numpy(sample_dict['total_time']).to(self.device)
-                test_loss.append(torch.abs(total_time - pred_time))
-                curr_pred_err = Metric.pred_err(total_time, pred_time, epsilon)
+                real_time = torch.from_numpy(query_dict['total_time']).to(self.device)
+                test_loss.append(torch.abs(real_time - predicted_runtimes))
+                curr_pred_err = Metric.pred_err(real_time, predicted_runtimes, epsilon)
                 pred_err.append(curr_pred_err)
-                # if idx == 6 or \
 
-                # print(samp_dict['feat_vec'])
-                if np.isnan(curr_pred_err.detach()).any() or \
-                        np.isinf(curr_pred_err.detach()).any():
-                    print("feat_vec", sample_dict['feat_vec'])
-                    print("pred_time", pred_time)
-                    print("total_time", total_time)
+                if np.isnan(curr_pred_err.detach()).any() or np.isinf(curr_pred_err.detach()).any():
+                    print("feat_vec", query_dict['feat_vec'])
+                    print("pred_time", predicted_runtimes)
+                    print("total_time", real_time)
 
-                all_tt = total_time if all_tt is None else torch.cat([total_time, all_tt])
-                all_pred_time = pred_time if all_pred_time is None \
-                    else torch.cat([pred_time, all_pred_time])
+                all_tt = real_time if all_tt is None else torch.cat([real_time, all_tt])
+                all_pred_time = predicted_runtimes if all_pred_time is None else torch.cat([predicted_runtimes, all_pred_time])
 
-                # if idx in self._test_losses and self._test_losses[idx] == curr_rq:
-                #     print(f"^^^^^^^^^^^^^^^^^^{samp_dict['node_type']} ^^^^^^^^^^^^^^^\n",
-                #           pred_time, '\n', tt, '\n')
-                #           # samp_dict['feat_vec'], '\n')
-                #     layer = self.units[samp_dict['node_type']].dense_block[0]
-                #     print(type(layer), layer.weight.grad)
-                #     for layer in self.units[samp_dict['node_type']].dense_block:
-                #         try:
-                #             print(type(layer), layer.weight.grad)
-                #         except:
-                #             assert(isinstance(layer, nn.ReLU) or isinstance(layer, nn.Tanh))
-
-                # self._test_losses[idx] = curr_rq
-                curr_rq = Metric.r_q(total_time, pred_time, epsilon)
-
-                curr_mean_mae = Metric.mean_mae(total_time, pred_time, epsilon)
-                total_mean_mae += curr_mean_mae * len(total_time)
+                curr_q_error = Metric.q_error(real_time, predicted_runtimes, epsilon)
+                curr_mean_mae = Metric.mean_mae(real_time, predicted_runtimes)
+                total_mean_mae += curr_mean_mae * len(real_time)
+                accumulate_err = Metric.accumulate_err(real_time, predicted_runtimes, epsilon)
 
                 if epoch % 50 == 0:
-                    print("####### eval by temp: idx {}, test_loss {}, pred_err {}, " \
-                          "rq {}, weighted mae {}, accumulate_err {} " \
-                          .format(operator_index, torch.mean(torch.abs(total_time - pred_time)).item(),
-                                  torch.mean(curr_pred_err).item(),
-                                  curr_rq, curr_mean_mae,
-                                  Metric.accumulate_err(total_time, pred_time, epsilon)))
+                    print(f"eval by temp: "
+                          f"idx {query_index}, "
+                          f"test_loss: {torch.mean(torch.abs(real_time - predicted_runtimes)).item()}, "
+                          f"pred_err: {torch.mean(curr_pred_err).item()}, "
+                          f"q-error: {curr_q_error}, "
+                          f"weighted mae: {curr_mean_mae}, "
+                          f"accumulate_err: {accumulate_err}")
 
             D_size = 0
             subbatch_loss = torch.zeros(1).to(self.device)
-            for operator in self.acc_loss:
-                # print(operator, self.acc_loss[operator])
-                all_loss = torch.cat(self.acc_loss[operator])
+            for operator_type, loss in self.accumulated_loss.items():
+                all_loss = torch.cat(loss)
                 D_size += all_loss.shape[0]
-                # print("all_loss.shape",all_loss.shape)
                 subbatch_loss += torch.sum(all_loss)
-
-                total_losses[operator].append(all_loss)
+                total_losses[operator_type].append(all_loss)
 
             subbatch_loss = torch.mean(torch.sqrt(subbatch_loss / D_size))
-            # print("subbatch_loss.shape",subbatch_loss.shape)
-            total_loss += subbatch_loss * sample_dict['subbatch_size']
+            total_loss += subbatch_loss * query_dict['subbatch_size']
 
         if self.test:
             all_test_loss = torch.cat(test_loss)
-            # print(test_loss[0].shape, test_loss[1].shape, all_test_loss.shape)
-            all_test_loss = torch.mean(all_test_loss)
-            self.test_loss = all_test_loss
+            self.test_loss = torch.mean(all_test_loss)
 
+            # Compute metrics
             all_pred_err = torch.cat(pred_err)
             self.pred_err = torch.mean(all_pred_err)
-
-            self.rq = Metric.r_q(all_tt, all_pred_time, epsilon)
-            self.accumulate_err = Metric.accumulate_err(all_tt, all_pred_time,
-                                                        epsilon)
+            self.weighted_mae = total_mean_mae / data_size
+            self.q_error = Metric.q_error(all_tt, all_pred_time, epsilon)
+            self.accumulate_err = Metric.accumulate_err(all_tt, all_pred_time, epsilon)
             self.weighted_mae = total_mean_mae / data_size
 
+            # Report metrics
             if epoch % 50 == 0:
-                print("test batch Pred Err: {}, R(q): {}, Accumulated Error: " \
-                      "{}, Weighted MAE: {}".format(self.pred_err,
-                                                    self.rq,
-                                                    self.accumulate_err,
-                                                    self.weighted_mae))
+                print(f"Test batch: "
+                      f"Pred Err: {self.pred_err}, "
+                      f"Q-Error: {self.q_error}, "
+                      f"Accumulated Error: {self.accumulate_err}, "
+                      f"Weighted MAE: {self.weighted_mae}")
 
         else:
-            self.curr_losses = {operator: torch.mean(torch.cat(total_losses[operator])).item() for operator in
-                                self.dimensions}
+            self.curr_losses = {operator: torch.mean(torch.cat(total_losses[operator])).item() for operator in self.dimensions_by_operator}
             self.total_loss = torch.mean(total_loss / self.batch_size)
-        # print("self.total_loss.shape", self.total_loss.shape)
 
     def backward(self):
         self.last_total_loss = self.total_loss.item()
@@ -309,36 +276,40 @@ class QPPNet():
     def optimize_parameters(self, epoch):
         """Calculate losses, gradients, and update network weights; called in every training iteration"""
         self.test = False
-        self._forward(epoch)
-        # clear prev grad first
+        self.forward(epoch)
+
+        # Clear previous gradients of the neural units
         for operator in self.optimizers:
             self.optimizers[operator].zero_grad()
 
+        # Call backward function
         self.backward()
 
+        # Do step on all operator-level optimizers
         for operator in self.optimizers:
             self.optimizers[operator].step()
             if len(self.schedulers) > 0:
                 self.schedulers[operator].step()
 
+        # Do validation
         self.input = self.test_dataset
         self.test = True
-        self._forward(epoch)
+        self.forward(epoch)
         self.last_test_loss = self.test_loss.item()
         self.last_pred_err = self.pred_err.item()
-        self.last_rq = self.rq
+        self.last_q_error = self.q_error
         self.test_loss, self.pred_err = None, None
-        self.rq = 0
+        self.q_error = 0
 
     def evaluate(self, eval_dataset):
         self.test = True
         self.set_input(eval_dataset)
-        self._forward(0)
+        self.forward(0)
         self.last_test_loss = self.test_loss.item()
         self.last_pred_err = self.pred_err.item()
-        self.last_rq = self.rq
+        self.last_q_error = self.q_error
         self.test_loss, self.pred_err = None, None
-        self.rq = 0
+        self.q_error = 0
 
     def get_current_losses(self):
         return self.curr_losses

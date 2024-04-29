@@ -4,9 +4,9 @@ This should be the only module that you directly import classes, instead of the 
 """
 import enum
 
+
 class Target(enum.Enum):
-    """The output targets for the operating units
-    """
+    """The output targets for the operating units"""
     START_TIME = 0
     CPU_ID = 1,
     CPU_CYCLE = 2,

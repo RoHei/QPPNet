@@ -14,7 +14,7 @@ parser.add_argument('--data_dir',
                     default='./res_by_temp/',
                     help='Dir containing train data')
 
-parser.add_argument('--dataset',
+parser.add_argument('--dataset_name',
                     type=str,
                     default='PSQLTPCH',
                     help='Select dataset [PSQLTPCH | TerrierTPCH | OLTP]')
@@ -77,11 +77,7 @@ parser.add_argument('--mean_range_dict',
                     type=str)
 
 
-def save_opt(opt, logf):
-    """Print and save options
-    It will print both current options and default values(if different).
-    It will save options into a text file / [checkpoints_dir] / opt.txt
-    """
+def save_parameters(opt, logf):
     message = ''
     message += '----------------- Options ---------------\n'
     for k, v in sorted(vars(opt).items()):
@@ -107,7 +103,7 @@ def report_losses(losses: List, logfile: TextIO, epoch: int):
               f"total_loss: {qpp.last_total_loss}; "
               f"test_loss: {qpp.last_test_loss}; "
               f"pred_err: {qpp.last_pred_err}; "
-              f"R(q): {qpp.last_rq}")
+              f"Q-Error: {qpp.last_q_error}")
         print(loss_str)
     logfile.write(loss_str + '\n')
 
@@ -118,50 +114,55 @@ def report_scores(epoch: int, total_iterations: int, qpp: QPPNet, logfile: TextI
                   f"total_loss: {qpp.last_total_loss}; "
                   f"test_loss: {qpp.last_test_loss}; "
                   f"pred_err: {qpp.last_pred_err}; "
-                  f"R(q): {qpp.last_rq}")
+                  f"Q-Error: {qpp.last_q_error}")
 
 
 if __name__ == '__main__':
     torch.set_default_tensor_type(torch.FloatTensor)
 
-    opt = parser.parse_args()
-    if opt.dataset == "PSQLTPCH":
-        dataset = PSQLTPCHDataSet(opt)
-    elif opt.dataset == "TerrierTPCH":
-        dataset = TerrierTPCHDataSet(opt)
+    # Initialize dataset
+    parameters = parser.parse_args()
+    if parameters.dataset_name == "PSQLTPCH":
+        dataset = PSQLTPCHDataSet(parameters)
+    elif parameters.dataset_name == "TerrierTPCH":
+        dataset = TerrierTPCHDataSet(parameters)
     else:
-        dataset = OLTPDataSet(opt)
+        dataset = OLTPDataSet(parameters)
 
-    qpp = QPPNet(opt)
+    # Initialize model
+    qpp = QPPNet(parameters)
 
     total_iterations = 0
-
-    if opt.test_time:
-        qpp.evaluate(dataset.all_dataset)
-        print(f'total_loss: {qpp.last_total_loss}; test_loss: {qpp.last_test_loss}; pred_err: {qpp.last_pred_err}; R(q): {qpp.last_rq}')
+    if parameters.test_time:
+        qpp.evaluate(dataset.train_dataset)
+        print(f'total_loss: {qpp.last_total_loss}; '
+              f'test_loss: {qpp.last_test_loss}; '
+              f'pred_err: {qpp.last_pred_err}; '
+              f'Q Error: {qpp.last_q_error}')
 
     else:
-        logfile = open(opt.logfile, 'w+')
-        save_opt(opt, logfile)
-        # qpp.test_dataset = dataset.create_test_data(opt)
+        logfile = open(parameters.logfile, 'w+')
+        save_parameters(parameters, logfile)
         qpp.test_dataset = dataset.test_dataset
 
-        for epoch in range(opt.start_epoch, opt.end_epoch):
+        for epoch in range(parameters.start_epoch, parameters.end_epoch):
             epoch_start_time = time.time()  # timer for entire epoch
-            iter_data_time = time.time()  # timer for data loading per iteration
-            epoch_iteration = 0  # the number of training iterations in current epoch, reset to 0 every epoch
-            batch = dataset.sample_new_batch()
-            total_iterations += opt.batch_size
+            iter_data_time = time.time()    # timer for data loading per iteration
 
+            batch = dataset.sample_new_batch()
+            total_iterations += parameters.batch_size
+
+            # Learning iteration and obtaining losses
             qpp.set_input(batch)
             qpp.optimize_parameters(epoch)
             losses = qpp.get_current_losses()
 
+            # Report metrics
             report_scores(epoch, total_iterations, qpp, logfile)
             report_losses(losses, logfile, epoch)
 
             # Regular model caching
-            if (epoch + 1) % opt.save_latest_epoch_freq == 0:
-                print('saving the latest model (epoch %d, total_iters %d)' % (epoch + 1, total_iterations))
+            if (epoch + 1) % parameters.save_latest_epoch_freq == 0:
+                print(f'Saving the latest model (epoch {epoch + 1}, total_iters {total_iterations})')
                 qpp.save_model(epoch + 1)
         logfile.close()

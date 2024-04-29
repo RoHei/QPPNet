@@ -1,6 +1,5 @@
 import collections
 import pickle
-import json
 from typing import List, Tuple
 
 import numpy as np
@@ -13,10 +12,10 @@ import dataset.terrier_tpch_dataset.terrier_query_info_0p1G as tqi_0p1
 import dataset.terrier_tpch_dataset.terrier_query_info_10G as tqi_10
 
 
-def get_input_for_all(SF):
-    if SF == 1:
+def get_input_for_all(scale_factor: float):
+    if scale_factor == 1:
         tqi = tqi_1
-    elif SF == 0.1:
+    elif scale_factor == 0.1:
         tqi = tqi_0p1
     else:
         tqi = tqi_10
@@ -36,33 +35,21 @@ def get_input_for_all(SF):
     return get_input
 
 
-def get_input_func(data_dir):
-    SF = data_dir.strip('.csv').split('execution_')[1]
-    if '0p1' in SF:
-        num = 0.1
-    elif '10' in SF:
-        num = 10
-    else:
-        num = 1
-    TR_GET_INPUT = collections.defaultdict(lambda: get_input_for_all(num))
-    return TR_GET_INPUT
-
-
 ###############################################################################
 #       Parsing data from csv files that contain json output of queries       #
 ###############################################################################
 
 class TerrierTPCHDataSet(PSQLTPCHDataSet):
-    def __init__(self, opt):
-        self.batch_size = opt.batch_size
+    def __init__(self, parameters):
+        self.batch_size = parameters.batch_size
         self.num_q = 1
         self.scale = 10000
         self.eps = 0.001
         self.train_test_split = 0.8
-        self.input_func: collections.defaultdict = get_input_func(opt.data_dir)
+        self.scale_factor = self.get_scale_factor(parameters.data_dir)
+        self.input_functions = collections.defaultdict(lambda: get_input_for_all(self.scale_factor))
 
-        all_plans = self.get_all_plans(opt.data_dir)
-        # print(" \n".join([str(ent) for ent in all_data[:10]]))
+        all_plans = self.load_query_from_file(parameters.data_dir)
         enum, num_grp = self.group_by_plan_structure(all_plans)
 
         count = Counter(enum)
@@ -94,18 +81,18 @@ class TerrierTPCHDataSet(PSQLTPCHDataSet):
         print("Number of samples per train groups: ", [len(grp) for grp in train_groups])
         self.dataset = train_data
 
-        if not opt.test_time:
-            self.mean_range_dict = self.normalize_operators(train_groups)
+        if not parameters.test_time:
+            self.mean_range_dict = self.get_feature_statistics(train_groups)
             with open('mean_range_dict.pickle', 'wb') as f:
                 pickle.dump(self.mean_range_dict, f)
         else:
-            with open(opt.mean_range_dict, 'rb') as f:
+            with open(parameters.feature_statistics, 'rb') as f:
                 self.mean_range_dict = pickle.load(f)
 
-        self.test_dataset = [self.get_input(grp) for grp in test_groups]
-        self.all_dataset = [self.get_input(grp) for grp in all_groups]
+        self.test_dataset = [self.vectorize_plans(grp) for grp in test_groups]
+        self.all_dataset = [self.vectorize_plans(grp) for grp in all_groups]
 
-    def get_input(self, operator_data: List[dict]):  # Helper for sample_data
+    def vectorize_plans(self, operator_data: List[dict]):  # Helper for sample_data
         """
             Vectorize the input of a list of plan_dicts (=elements of training data),
             that have the same query plan structure (of the same template/group)
@@ -124,12 +111,13 @@ class TerrierTPCHDataSet(PSQLTPCHDataSet):
                 -- total_time     : a vector of prediction target for each query in data
                 -- is_subplan     : if the queries are subplans
         """
+
         samp_dict = {"node_type": operator_data[0]["Operator Type"],
                      "real_node_type": operator_data[0]["Node Type"],
                      "subbatch_size": len(operator_data)}
 
         # Reading out feature vector according to input function
-        feature_vector = np.array([self.input_func[jss["Node Type"]](jss) for jss in operator_data])
+        feature_vector = np.array([self.input_functions[jss["Node Type"]](jss) for jss in operator_data])
         feature_vector = (feature_vector + self.eps) / (self.mean_range_dict[samp_dict["node_type"]][0] + self.eps)
 
         # Adding random weights? Special case for "lineitem" nodes
@@ -144,7 +132,7 @@ class TerrierTPCHDataSet(PSQLTPCHDataSet):
         child_plan_lst = []
         if 'Plans' in operator_data[0]:
             for i in range(len(operator_data[0]['Plans'])):
-                child_plan_dict = self.get_input([jss['Plans'][i] for jss in operator_data])
+                child_plan_dict = self.vectorize_plans([jss['Plans'][i] for jss in operator_data])
                 child_plan_dict['is_subplan'] = False
                 child_plan_lst.append(child_plan_dict)
 
@@ -153,11 +141,11 @@ class TerrierTPCHDataSet(PSQLTPCHDataSet):
         samp_dict["total_time"] = np.array(operator_runtimes).astype(np.float32) / self.scale
         return samp_dict
 
-    def normalize_operators(self, train_groups):  # compute the mean and std vec of each operator
+    def get_feature_statistics(self, train_groups):  # compute the mean and std vec of each operator
         feat_vec_col = {operator: [] for operator in terrier_dimensions}
 
         def parse_input(data):
-            feat_vec = [self.input_func[data[0]["Operator Type"]](jss) for jss in data]
+            feat_vec = [self.input_functions[data[0]["Operator Type"]](jss) for jss in data]
             # print(feat_vec)
             if 'Plans' in data[0]:
                 for i in range(len(data[0]['Plans'])):
@@ -179,7 +167,7 @@ class TerrierTPCHDataSet(PSQLTPCHDataSet):
                            for operator in terrier_dimensions}
         return mean_range_dict
 
-    def get_all_plans(self, file_name: str):
+    def load_query_from_file(self, file_name: str):
         """
         Returns a list of dicts each with the key:
         Actual Total Time, Node Type             ,  Operator Type, Plans
@@ -235,18 +223,16 @@ class TerrierTPCHDataSet(PSQLTPCHDataSet):
         print(f"Operators: {unique}")
         return enum, counter
 
-    def sample_new_batch(self):
-        """
-        Reads out a random batch from the dataset and applies a group-wise parsing
-        """
+    def sample_new_batch(self) -> List[dict]:
+        """ Reads out a random batch from the dataset and applies a group-wise parsing """
 
-        # Create random indexes from the dataset (num = batch size)
-        sample_indexes = np.random.choice(np.arange(len(self.dataset)), self.batch_size, replace=False)
+        # Get random indexes from the dataset (num = batch size)
+        sample_indexes = np.random.choice(np.arange(self.num_query_plans), self.batch_size, replace=False)
 
         # Group them according to the given groups
         grouped_samples = [[] for _ in range(self.num_groups[0])]
         for sample_index in sample_indexes:
-            # Look up the group of each datapoint
+            # Look up the group of each query
             group_index = self.group_indexes[sample_index]
             # Collect the actual datapoints by their group
             grouped_samples[group_index].append(self.dataset[sample_index])
@@ -255,5 +241,16 @@ class TerrierTPCHDataSet(PSQLTPCHDataSet):
         batch = []
         for group in grouped_samples:
             if len(group) != 0:
-                batch.append(self.get_input(group))
+                batch.append(self.vectorize_plans(group))
         return batch
+
+    @staticmethod
+    def get_scale_factor(dir: str) -> float:
+        scale_factor = dir.strip('.csv').split('execution_')[1]
+        if '0p1' in scale_factor:
+            num = 0.1
+        elif '10' in scale_factor:
+            num = 10
+        else:
+            num = 1
+        return num

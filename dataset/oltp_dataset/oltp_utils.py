@@ -20,14 +20,14 @@ ALL_OPS = ['UPDATE', 'LIMIT', 'SORT_ITERATE', 'OP_DECIMAL_PLUS_OR_MINUS',
 ###############################################################################
 
 class OLTPDataSet(PSQLTPCHDataSet):
-    def __init__(self, opt):
-        self.batch_size = opt.batch_size
+    def __init__(self, parameters):
+        self.batch_size = parameters.batch_size
         self.num_q = 1
 
         self.SCALE = SCALE
         self.input_func = None
 
-        all_data = self.get_all_plans(opt.data_dir)
+        all_data = self.load_query_from_file(parameters.data_dir)
         print(" \n".join([str(ent) for ent in all_data[:10]]))
         enum, num_grp = self.group_by_plan_structure(all_data)
 
@@ -58,21 +58,21 @@ class OLTPDataSet(PSQLTPCHDataSet):
         self.dataset = train_data
         self.datasize = len(self.dataset)
 
-        if not opt.test_time:
-            self.mean_range_dict = self.normalize_operators(train_groups)
+        if not parameters.test_time:
+            self.mean_range_dict = self.get_feature_statistics(train_groups)
             with open('mean_range_dict.pickle', 'wb') as f:
                 pickle.dump(self.mean_range_dict, f)
         else:
-            with open(opt.mean_range_dict, 'rb') as f:
+            with open(parameters.feature_statistics, 'rb') as f:
                 self.mean_range_dict = pickle.load(f)
 
         print(self.mean_range_dict)
 
-        test_dataset = [self.get_input(grp) for grp in test_groups]
+        test_dataset = [self.vectorize_plans(grp) for grp in test_groups]
         self.test_dataset = test_dataset
-        self.all_dataset = [self.get_input(grp) for grp in all_groups]
+        self.all_dataset = [self.vectorize_plans(grp) for grp in all_groups]
 
-    def get_input(self, data): # Helper for sample_data
+    def vectorize_plans(self, data): # Helper for sample_data
         """
             Vectorize the input of a list of plan_dicts that have the same query plan structure (of the same template/group)
 
@@ -108,7 +108,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
         child_plan_lst = []
         if 'Plans' in data[0]:
             for i in range(len(data[0]['Plans'])):
-                child_plan_dict = self.get_input([jss['Plans'][i] for jss in data])
+                child_plan_dict = self.vectorize_plans([jss['Plans'][i] for jss in data])
                 child_plan_dict['is_subplan'] = False
                 child_plan_lst.append(child_plan_dict)
 
@@ -118,7 +118,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
 
         return new_samp_dict
 
-    def normalize_operators(self, train_groups): # compute the mean and std vec of each operator
+    def get_feature_statistics(self, train_groups): # compute the mean and std vec of each operator
         feat_vec_col = defaultdict(list)
 
         def parse_input(data):
@@ -144,7 +144,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
                            for operator in feat_vec_col}
         return mean_range_dict
 
-    def get_all_plans(self, fname):
+    def load_query_from_file(self, fname):
         jss = []
         currtree = {"Actual Total Time": 0}
         prev = (None, None)
@@ -203,7 +203,7 @@ class OLTPDataSet(PSQLTPCHDataSet):
         for i, grp in enumerate(samp_group):
 
             if len(grp) != 0:
-                parsed_input.append(self.get_input(grp))
+                parsed_input.append(self.vectorize_plans(grp))
 
         return parsed_input
 
@@ -218,6 +218,6 @@ class OLTPDataSet(PSQLTPCHDataSet):
         parsed_input = []
         for i, grp in enumerate(samp_group):
             if len(grp) != 0:
-                parsed_input.append(self.get_input(grp))
+                parsed_input.append(self.vectorize_plans(grp))
 
         return parsed_input

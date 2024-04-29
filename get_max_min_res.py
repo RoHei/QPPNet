@@ -123,7 +123,3 @@ with open('attr_max_min_med/med_attrs.txt', 'r') as f:
         counter += len(cols)
 
 attr_val_dict = {'med':med_dict, 'min': min_dict, 'max' : max_dict}
-
-import pickle
-with open('attr_val_dict.pickle', 'wb') as f:
-    pickle.dump(attr_val_dict, f)

@@ -1,227 +1,83 @@
+import collections
+import json
+import os
+import pickle
 from typing import List, Tuple
 
 import numpy as np
-import collections, os, json, pickle
-from dataset.postgres_tpch_dataset.attr_rel_dict import *
-import pickle
-
-
-SCALE = 1
-TRAIN_TEST_SPLIT = 0.8
-
-
-
-with open('dataset/postgres_tpch_dataset/attr_val_dict.pickle', 'rb') as f:
-    attr_val_dict = pickle.load(f)
-
-
-# need to normalize Plan Width, Plan Rows, Total Cost, Hash Bucket
-def get_basics(plan_dict):
-    return [plan_dict['Plan Width'], plan_dict['Plan Rows'],
-            plan_dict['Total Cost']]
-
-
-def get_rel_one_hot(rel_name):
-    arr = [0] * num_rel
-    arr[rel_names.index(rel_name)] = 1
-    return arr
-
-
-def get_index_one_hot(index_name):
-    arr = [0] * num_index
-    arr[index_names.index(index_name)] = 1
-    return arr
-
-
-def get_rel_attr_one_hot(rel_name, filter_line):
-    attr_list = rel_attr_list_dict[rel_name]
-
-    med_vec, min_vec, max_vec = [0] * max_num_attr, [0] * max_num_attr, \
-                                [0] * max_num_attr
-
-    for idx, attr in enumerate(attr_list):
-        if attr in filter_line:
-            med_vec[idx] = attr_val_dict['med'][rel_name][idx]
-            min_vec[idx] = attr_val_dict['min'][rel_name][idx]
-            max_vec[idx] = attr_val_dict['max'][rel_name][idx]
-    return min_vec + med_vec + max_vec
-
-
-def get_scan_input(plan_dict):
-    # plan_dict: dict where the plan_dict['node_type'] = 'Seq Scan'
-    rel_vec = get_rel_one_hot(plan_dict['Relation Name'])
-    try:
-        rel_attr_vec = get_rel_attr_one_hot(plan_dict['Relation Name'],
-                                            plan_dict['Filter'])
-    except:
-        try:
-            rel_attr_vec = get_rel_attr_one_hot(plan_dict['Relation Name'],
-                                                plan_dict['Recheck Cond'])
-        except:
-            if 'Filter' in plan_dict:
-                print('************************* default *************************')
-                print(plan_dict)
-            rel_attr_vec = [0] * max_num_attr * 3
-
-    return get_basics(plan_dict) + rel_vec + rel_attr_vec
-
-
-def get_index_scan_input(plan_dict):
-    # plan_dict: dict where the plan_dict['node_type'] = 'Index Scan'
-
-    rel_vec = get_rel_one_hot(plan_dict['Relation Name'])
-    index_vec = get_index_one_hot(plan_dict['Index Name'])
-
-    try:
-        rel_attr_vec = get_rel_attr_one_hot(plan_dict['Relation Name'],
-                                            plan_dict['Index Cond'])
-    except:
-        if 'Index Cond' in plan_dict:
-            print('********************* default rel_attr_vec *********************')
-            print(plan_dict)
-        rel_attr_vec = [0] * max_num_attr * 3
-
-    res = get_basics(plan_dict) + rel_vec + rel_attr_vec + index_vec \
-          + [1 if plan_dict['Scan Direction'] == 'Forward' else 0]
-
-    return res
-
-
-def get_bitmap_index_scan_input(plan_dict):
-    # plan_dict: dict where the plan_dict['node_type'] = 'Bitmap Index Scan'
-    index_vec = get_index_one_hot(plan_dict['Index Name'])
-
-    return get_basics(plan_dict) + index_vec
-
-
-def get_hash_input(plan_dict):
-    return get_basics(plan_dict) + [plan_dict['Hash Buckets']]
-
-
-def get_join_input(plan_dict):
-    type_vec = [0] * len(join_types)
-    type_vec[join_types.index(plan_dict['Join Type'].lower())] = 1
-    par_rel_vec = [0] * len(parent_rel_types)
-    if 'Parent Relationship' in plan_dict:
-        par_rel_vec[parent_rel_types.index(plan_dict['Parent Relationship'].lower())] = 1
-    return get_basics(plan_dict) + type_vec + par_rel_vec
-
-
-def get_sort_key_input(plan_dict):
-    kys = plan_dict['Sort Key']
-    one_hot = [0] * (num_rel * max_num_attr)
-    for key in kys:
-        key = key.replace('(', ' ').replace(')', ' ')
-        for subkey in key.split(" "):
-            if subkey != ' ' and '.' in subkey:
-                rel_name, attr_name = subkey.split(' ')[0].split('.')
-                if rel_name in rel_names:
-                    one_hot[rel_names.index(rel_name) * max_num_attr
-                            + rel_attr_list_dict[rel_name].index(attr_name.lower())] = 1
-
-    return one_hot
-
-
-def get_sort_input(plan_dict):
-    sort_meth = [0] * len(sort_algos)
-    if 'Sort Method' in plan_dict:
-        if "external" not in plan_dict['Sort Method'].lower():
-            sort_meth[sort_algos.index(plan_dict['Sort Method'].lower())] = 1
-
-    return get_basics(plan_dict) + get_sort_key_input(plan_dict) + sort_meth
-
-
-def get_aggreg_input(plan_dict):
-    strat_vec = [0] * len(aggreg_strats)
-    strat_vec[aggreg_strats.index(plan_dict['Strategy'].lower())] = 1
-    partial_mode_vec = [0] if plan_dict['Parallel Aware'] == 'false' else [1]
-    return get_basics(plan_dict) + strat_vec + partial_mode_vec
-
-
-TPCH_GET_INPUT = \
-    {
-        "Hash Join": get_join_input,
-        "Merge Join": get_join_input,
-        "Seq Scan": get_scan_input,
-        "Index Scan": get_index_scan_input,
-        "Index Only Scan": get_index_scan_input,
-        "Bitmap Heap Scan": get_scan_input,
-        "Bitmap Index Scan": get_bitmap_index_scan_input,
-        "Sort": get_sort_input,
-        "Hash": get_hash_input,
-        "Aggregate": get_aggreg_input
-    }
-
-TPCH_GET_INPUT = collections.defaultdict(lambda: get_basics, TPCH_GET_INPUT)
+from dataset.constants import get_basics, all_dicts, tpch_input_functions
 
 
 ###############################################################################
 #       Parsing data from csv files that contain json output of queries       #
 ###############################################################################
 
-class PSQLTPCHDataSet():
-    def __init__(self, opt):
+class PSQLTPCHDataSet:
+    def __init__(self, parameters):
         """
             Initialize the dataset by parsing the data files.
             Perform train test split and normalize each feature using mean and max of the train dataset.
 
             self.dataset is the train dataset
-            self.test_dataset is the test dataset
         """
-        self.training_samples_per_query = int(500 * TRAIN_TEST_SPLIT)
-        self.batch_size = opt.batch_size
-        self.num_q = 22
-        self.scale = SCALE
-        self.input_func = TPCH_GET_INPUT
-        # fnames = [fname for fname in os.listdir(opt.data_dir) if 'csv' in fname]
-        fnames = [fname for fname in os.listdir(opt.data_dir)]
-        fnames = sorted(fnames, key=lambda fname: int(fname.split('_plans')[0][6:]))
 
-        data = []
-        all_groups, all_groups_test = [], []
+        self.scale_factor = 1
+        self.train_test_split = 0.8
+        self.training_samples_per_query = int(500 * self.train_test_split)
+        self.batch_size = parameters.batch_size
+        self.number_of_queries = 22
+        self.input_functions = collections.defaultdict(lambda: get_basics, tpch_input_functions)
+
+        # Reading and sorting file names that each contain the query plans
+        file_names = [fname for fname in os.listdir(parameters.data_dir)]
+        file_names = sorted(file_names, key=lambda fname: int(fname.split('_plans')[0][6:]))
+
+        all_query_plans = []
+        all_queries_by_group, all_test_queries_by_group = [], []
 
         self.group_indexes = []
-        self.num_groups = [0] * self.num_q
-        for i, fname in enumerate(fnames):
-            temp_data = self.get_all_plans(opt.data_dir + '/' + fname)
+        self.num_groups = [0] * self.number_of_queries
 
-            ##### this is for all samples for this query template #####
-            enum, num_grp = self.group_by_plan_structure(temp_data)
-            groups = [[] for _ in range(num_grp)]
-            for j, grp_idx in enumerate(enum):
-                groups[grp_idx].append(temp_data[j])
-            all_groups += groups
+        # Collect query plans and groups from file
+        for file_index, file_name in enumerate(file_names):
+            query_plans = self.load_query_from_file(parameters.data_dir + '/' + file_name)
+            group_index_per_query, number_of_groups = self.group_by_plan_structure(query_plans)
 
-            ##### this is for train #####
-            self.group_indexes += enum[:self.training_samples_per_query]
-            self.num_groups[i] = num_grp
-            data += temp_data[:self.training_samples_per_query]
+            # For all the different groups (e.g. query types) in the plan, do actual grouping of queries
+            queries_by_group = [[] for _ in range(number_of_groups)]
+            for j, grp_idx in enumerate(group_index_per_query):
+                queries_by_group[grp_idx].append(query_plans[j])
+            all_queries_by_group += queries_by_group
 
-            ##### this is for test #####
-            test_groups = [[] for _ in range(num_grp)]
-            for j, grp_idx in enumerate(enum[self.training_samples_per_query:]):
-                test_groups[grp_idx].append(temp_data[self.training_samples_per_query + j])
-            all_groups_test += test_groups
+            # Training data
+            self.group_indexes += group_index_per_query[:self.training_samples_per_query]
+            self.num_groups[file_index] = number_of_groups
+            all_query_plans += query_plans[:self.training_samples_per_query]
 
-        self.dataset = data
-        self.datasize = len(self.dataset)
-        print("Number of groups per query: ", self.num_groups)
+            # Testing data
+            test_queries_by_group = [[] for _ in range(number_of_groups)]
+            for j, grp_idx in enumerate(group_index_per_query[self.training_samples_per_query:]):
+                test_queries_by_group[grp_idx].append(query_plans[self.training_samples_per_query + j])
+            all_test_queries_by_group += test_queries_by_group
 
-        if not opt.test_time:
-            self.mean_range_dict = self.normalize_operators()
+        self.query_plans = all_query_plans
+        self.num_query_plans = len(self.query_plans)
 
+        self.init_feature_stats(parameters)
+
+        self.test_dataset = [self.vectorize_plans(grp) for grp in all_test_queries_by_group]
+        self.train_dataset = [self.vectorize_plans(grp) for grp in all_queries_by_group]
+
+    def init_feature_stats(self, parameters):
+        if not parameters.test_time:
+            self.feature_statistics = self.get_feature_statistics()
             with open('mean_range_dict.pickle', 'wb') as f:
-                pickle.dump(self.mean_range_dict, f)
+                pickle.dump(self.feature_statistics, f)
         else:
-            with open(opt.mean_range_dict, 'rb') as f:
-                self.mean_range_dict = pickle.load(f)
+            with open(parameters.feature_statistics, 'rb') as f:
+                self.feature_statistics = pickle.load(f)
 
-        print(self.mean_range_dict)
-
-        self.test_dataset = [self.get_input(grp) for grp in all_groups_test]
-        self.all_dataset = [self.get_input(grp) for grp in all_groups]
-
-    def normalize_operators(self):  # compute the mean and std vec of each operator
+    def get_feature_statistics(self):  # compute the mean and std vec of each operator
         """
             For each operator, normalize each input feature to have a mean of 0 and maximum of 1
 
@@ -233,20 +89,21 @@ class PSQLTPCHDataSet():
         feat_vec_col = {operator: [] for operator in all_dicts}
 
         def parse_input(data):
-            feat_vec = [self.input_func[data[0]["Node Type"]](jss) for jss in data]
+            feat_vec = [self.input_functions[data[0]["Node Type"]](jss) for jss in data]
             if 'Plans' in data[0]:
                 for i in range(len(data[0]['Plans'])):
                     parse_input([jss['Plans'][i] for jss in data])
             feat_vec_col[data[0]["Node Type"]].append(np.array(feat_vec).astype(np.float32))
 
-        for i in range(self.datasize // self.training_samples_per_query):
+        for i in range(self.num_query_plans // self.training_samples_per_query):
             try:
                 if self.num_groups[i] == 1:
-                    parse_input(self.dataset[i * self.training_samples_per_query:(i + 1) * self.training_samples_per_query])
+                    parse_input(
+                        self.query_plans[i * self.training_samples_per_query:(i + 1) * self.training_samples_per_query])
                 else:
                     groups = [[] for j in range(self.num_groups[i])]
                     offset = i * self.training_samples_per_query
-                    for j, plan_dict in enumerate(self.dataset[offset:offset + self.training_samples_per_query]):
+                    for j, plan_dict in enumerate(self.query_plans[offset:offset + self.training_samples_per_query]):
                         groups[self.group_indexes[offset + j]].append(plan_dict)
                     for grp in groups:
                         parse_input(grp)
@@ -255,7 +112,7 @@ class PSQLTPCHDataSet():
 
         def cmp_mean_range(feat_vec_lst):
             if len(feat_vec_lst) == 0:
-                return (0, 1)
+                return 0, 1
             else:
                 total_vec = np.concatenate(feat_vec_lst)
                 return (np.mean(total_vec, axis=0),
@@ -265,7 +122,7 @@ class PSQLTPCHDataSet():
                            for operator in all_dicts}
         return mean_range_dict
 
-    def get_all_plans(self, file_name: str) -> List[dict]:
+    def load_query_from_file(self, file_name: str) -> List[dict]:
         """
             Parse from data file
 
@@ -347,7 +204,7 @@ class PSQLTPCHDataSet():
         assert (counter > 0)
         return enum, counter
 
-    def get_input(self, data: List[dict]) -> dict:  # Helper for sample_data
+    def vectorize_plans(self, data: List[dict]) -> dict:  # Helper for sample_data
         """
             Vectorize the input of a list of queries that have the same plan structure (of the same template/group)
 
@@ -369,24 +226,24 @@ class PSQLTPCHDataSet():
         samp_dict = {"node_type": data[0]["Node Type"],
                      "subbatch_size": len(data)}
 
-        feature_vector = np.array([self.input_func[jss["Node Type"]](jss) for jss in data])
+        feature_vector = np.array([self.input_functions[jss["Node Type"]](jss) for jss in data])
 
         # normalize feat_vec
         feature_vector = (feature_vector -
-                    self.mean_range_dict[samp_dict["node_type"]][0]) \
-                   / self.mean_range_dict[samp_dict["node_type"]][1]
+                          self.feature_statistics[samp_dict["node_type"]][0]) \
+                         / self.feature_statistics[samp_dict["node_type"]][1]
 
         total_time = [jss['Actual Total Time'] for jss in data]
 
         child_plan_lst = []
         if 'Plans' in data[0]:
             for i in range(len(data[0]['Plans'])):
-                child_plan_dict = self.get_input([jss['Plans'][i] for jss in data])
+                child_plan_dict = self.vectorize_plans([jss['Plans'][i] for jss in data])
                 child_plan_lst.append(child_plan_dict)
 
         samp_dict["feat_vec"] = np.array(feature_vector).astype(np.float32)
         samp_dict["children_plan"] = child_plan_lst
-        samp_dict["total_time"] = np.array(total_time).astype(np.float32) / self.scale
+        samp_dict["total_time"] = np.array(total_time).astype(np.float32) / self.scale_factor
 
         if 'Subplan Name' in data[0]:
             samp_dict['is_subplan'] = True
@@ -397,7 +254,7 @@ class PSQLTPCHDataSet():
     ###############################################################################
     #       Sampling subbatch data from the dataset; total size is batch_size     #
     ###############################################################################
-    def sample_new_batch(self) -> List:
+    def sample_new_batch(self) -> List[dict]:
         """
             Randomly sample a batch of data points from the train dataset
 
@@ -405,19 +262,18 @@ class PSQLTPCHDataSet():
             - parsed_input: a list of dictionaries with inputs vectorized by get_input,
                             each dictionary contains all samples in the batch that comes from this group
         """
-        # dataset: all queries used in training
-        samp = np.random.choice(np.arange(self.datasize), self.batch_size, replace=False)
+        sample_indexes = np.random.choice(np.arange(self.num_query_plans), self.batch_size, replace=False)
 
-        samp_group = [[[] for j in range(self.num_groups[i])]
-                      for i in range(self.num_q)]
-        for idx in samp:
-            grp_idx = self.group_indexes[idx]
-            samp_group[idx // self.training_samples_per_query][grp_idx].append(self.dataset[idx])
+        grouped_samples = [[[] for j in range(self.num_groups[i])] for i in range(self.number_of_queries)]
 
-        parsed_input = []
-        for i, temp in enumerate(samp_group):
+        for sample_index in sample_indexes:
+            group_index = self.group_indexes[sample_index]
+            grouped_samples[sample_index // self.training_samples_per_query][group_index].append(self.query_plans[sample_index])
+
+        batch = []
+        for i, temp in enumerate(grouped_samples):
             for grp in temp:
                 if len(grp) != 0:
-                    parsed_input.append(self.get_input(grp))
+                    batch.append(self.vectorize_plans(grp))
 
-        return parsed_input
+        return batch
